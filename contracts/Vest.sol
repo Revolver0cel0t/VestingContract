@@ -27,10 +27,34 @@ contract Vest {
         _;
     }
 
-    modifier onlyActiveClaims(address claimee) {
+    modifier onlyExistingClaims(address claimee) {
         require(
             userClaims[claimee].claimStart > 0,
             "Claim doesnt exist on account"
+        );
+        _;
+    }
+
+    modifier onlyActiveClaims(address claimee) {
+        require(
+            block.timestamp < userClaims[claimee].claimEnd &&
+                userClaims[claimee].dripped -
+                    userClaims[claimee].totalVestedAmount <
+                0 &&
+                userClaims[claimee].claimStart > 0,
+            "Expired claim"
+        );
+        _;
+    }
+
+    modifier onlyExpiredClaims(address claimee) {
+        require(
+            userClaims[claimee].claimStart > 0 &&
+                !(block.timestamp < userClaims[claimee].claimEnd &&
+                    userClaims[claimee].dripped -
+                        userClaims[claimee].totalVestedAmount <
+                    0),
+            "Active claim"
         );
         _;
     }
@@ -46,7 +70,6 @@ contract Vest {
     constructor(address owner, address token) {
         _owner = owner;
         claimToken = token;
-        totalClaimable = 0;
     }
 
     function depositToken(uint256 amount) public {
@@ -72,20 +95,30 @@ contract Vest {
         uint256 cliffPeriod
     ) public onlyOwner onlyInactiveClaims(claimee) {
         ClaimData storage claimForUser = userClaims[claimee];
-        require(amount > 0, "Token amount has to be greater than 0!");
+        _createChecks(amount, claimEndTimestamp, claimStartTimestamp);
+        totalClaimable += amount;
+        claimForUser.claimEnd = claimEndTimestamp;
+        claimForUser.totalVestedAmount = amount;
+        claimForUser.claimStart = claimStartTimestamp;
+        if (cliffPeriod > 0) {
+            _cliffChecks(claimForUser, cliffPeriod);
+            claimForUser.cliffEnd = cliffPeriod;
+        }
+    }
+
+    function restartClaim(
+        address claimee,
+        uint256 amount,
+        uint256 claimEndTimestamp,
+        uint256 claimStartTimestamp,
+        uint256 cliffPeriod
+    ) public onlyOwner onlyExpiredClaims(claimee) {
+        ClaimData storage claimForUser = userClaims[claimee];
         require(
-            claimEndTimestamp > block.timestamp,
-            "End period must be greater than block timestamp"
+            claimForUser.totalVestedAmount - claimForUser.dripped == 0,
+            "Cannot create a new claim unless the old one has its claims withdrawn by the user"
         );
-        require(
-            claimEndTimestamp > claimStartTimestamp,
-            "Start period must be lower than end period"
-        );
-        require(
-            totalClaimable + amount <=
-                ERC20(claimToken).balanceOf(address(this)),
-            "Cannot add a user as the total claims would exceed token reserves"
-        );
+        _createChecks(amount, claimEndTimestamp, claimStartTimestamp);
         totalClaimable += amount;
         claimForUser.claimEnd = claimEndTimestamp;
         claimForUser.totalVestedAmount = amount;
@@ -99,7 +132,7 @@ contract Vest {
     function removeClaimee(address claimee)
         public
         onlyOwner
-        onlyActiveClaims(claimee)
+        onlyExistingClaims(claimee)
     {
         ClaimData storage claimForUser = userClaims[claimee];
         _accrueRewards(claimForUser);
@@ -115,25 +148,21 @@ contract Vest {
         onlyActiveClaims(claimee)
     {
         ClaimData storage claimForUser = userClaims[claimee];
-        uint256 claimPeriodForUser = claimForUser.claimEnd;
-        require(
-            claimPeriodForUser > block.timestamp,
-            "Users claim period has expired, renew his claim period to change his claim amount!"
-        );
         require(newAmount > 0, "New amount must be greater than 0!");
         require(
-            totalClaimable - claimForUser.totalVestedAmount + newAmount <=
-                ERC20(claimToken).balanceOf(address(this)),
+            claimForUser.dripped < newAmount,
+            "That amount has already been vested to the user"
+        );
+        uint256 newTotal = totalClaimable +
+            (newAmount) -
+            (claimForUser.totalVestedAmount - claimForUser.dripped);
+        require(
+            newTotal <= ERC20(claimToken).balanceOf(address(this)),
             "Cannot change claim amount as the total claims would exceed token reserves"
         );
         _accrueRewards(claimForUser);
-        totalClaimable =
-            totalClaimable -
-            claimForUser.totalVestedAmount +
-            newAmount;
+        totalClaimable = newTotal;
         claimForUser.totalVestedAmount = newAmount;
-        claimForUser.dripped = 0;
-        claimForUser.claimStart = block.timestamp;
     }
 
     function changeVestPeriod(address claimee, uint256 newPeriod)
@@ -146,7 +175,6 @@ contract Vest {
             newPeriod > block.timestamp,
             "New claim period has to be greater than the current time"
         );
-        require(claimForUser.claimStart > 0, "Claim doesnt exist for account");
         if (claimForUser.cliffEnd > 0) {
             require(
                 newPeriod > claimForUser.cliffEnd,
@@ -155,11 +183,6 @@ contract Vest {
         }
         _accrueRewards(claimForUser);
         claimForUser.claimEnd = newPeriod;
-        claimForUser.totalVestedAmount =
-            claimForUser.totalVestedAmount -
-            claimForUser.dripped;
-        claimForUser.dripped = 0;
-        claimForUser.claimStart = block.timestamp;
     }
 
     function changeCliff(address claimee, uint256 newCliff)
@@ -190,6 +213,7 @@ contract Vest {
             claimForUser,
             block.timestamp
         );
+        totalClaimable -= rewards;
         claimForUser.dripped += rewards;
         claimForUser.claimable += rewards;
     }
@@ -226,5 +250,26 @@ contract Vest {
         );
         uint256 diff = (newCliff - _claim.claimStart) / 60 / 60 / 24;
         require(diff <= 180, "Cliff period cannot be greater than 6 months!");
+    }
+
+    function _createChecks(
+        uint256 amount,
+        uint256 claimEndTimestamp,
+        uint256 claimStartTimestamp
+    ) internal view {
+        require(amount > 0, "Token amount has to be greater than 0!");
+        require(
+            claimEndTimestamp > block.timestamp,
+            "End period must be greater than block timestamp"
+        );
+        require(
+            claimEndTimestamp > claimStartTimestamp,
+            "Start period must be lower than end period"
+        );
+        require(
+            totalClaimable + amount <=
+                ERC20(claimToken).balanceOf(address(this)),
+            "Cannot add a user as the total claims would exceed token reserves"
+        );
     }
 }
