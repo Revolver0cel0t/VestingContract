@@ -129,7 +129,6 @@ contract Vest {
         onlyExistingClaims(claimee)
     {
         ClaimData storage claimForUser = userClaims[claimee];
-        _accrueRewards(claimForUser);
         _clearClaim(claimForUser);
     }
 
