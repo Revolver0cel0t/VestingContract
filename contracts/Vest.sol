@@ -129,6 +129,10 @@ contract Vest {
         onlyExistingClaims(claimee)
     {
         ClaimData storage claimForUser = userClaims[claimee];
+        require(
+            claimForUser.claimable == 0,
+            "Cannot create a new claim unless the old one has its claims withdrawn by the user"
+        );
         _clearClaim(claimForUser);
     }
 
