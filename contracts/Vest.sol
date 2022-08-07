@@ -38,9 +38,7 @@ contract Vest {
     modifier onlyActiveClaims(address claimee) {
         require(
             block.timestamp < userClaims[claimee].claimEnd &&
-                userClaims[claimee].dripped -
-                    userClaims[claimee].totalVestedAmount <
-                0 &&
+                _remainingUserClaimableAmount(userClaims[claimee]) > 0 &&
                 userClaims[claimee].claimStart > 0,
             "Expired claim"
         );
@@ -51,9 +49,7 @@ contract Vest {
         require(
             userClaims[claimee].claimStart > 0 &&
                 !(block.timestamp < userClaims[claimee].claimEnd &&
-                    userClaims[claimee].dripped -
-                        userClaims[claimee].totalVestedAmount <
-                    0),
+                    _remainingUserClaimableAmount(userClaims[claimee]) > 0),
             "Active claim"
         );
         _;
@@ -114,7 +110,7 @@ contract Vest {
     ) public onlyOwner onlyExpiredClaims(claimee) {
         ClaimData storage claimForUser = userClaims[claimee];
         require(
-            claimForUser.totalVestedAmount - claimForUser.dripped == 0,
+            _remainingUserClaimableAmount(claimForUser) == 0,
             "Cannot create a new claim unless the old one has its claims withdrawn by the user"
         );
         _createChecks(amount, claimEndTimestamp, claimStartTimestamp);
@@ -150,7 +146,7 @@ contract Vest {
         );
         uint256 newTotal = totalClaimable +
             (newAmount) -
-            (claimForUser.totalVestedAmount - claimForUser.dripped);
+            (_remainingUserClaimableAmount(claimForUser));
         require(
             newTotal <= ERC20(claimToken).balanceOf(address(this)),
             "Cannot change claim amount as the total claims would exceed token reserves"
@@ -223,7 +219,7 @@ contract Vest {
         ) {
             return 0;
         } else if (currentTime >= claimForUser.claimEnd) {
-            return claimForUser.totalVestedAmount - (claimForUser.dripped);
+            return _remainingUserClaimableAmount(claimForUser);
         } else {
             uint256 timeFromStart = currentTime - claimForUser.claimStart;
             uint256 vestedAmount = (claimForUser.totalVestedAmount *
@@ -294,5 +290,13 @@ contract Vest {
         _claim.totalVestedAmount = 0;
         _claim.claimable = 0;
         _claim.dripped = 0;
+    }
+
+    function _remainingUserClaimableAmount(ClaimData memory _claim)
+        internal
+        pure
+        returns (uint256)
+    {
+        return _claim.totalVestedAmount - _claim.dripped;
     }
 }
