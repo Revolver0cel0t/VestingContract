@@ -96,14 +96,13 @@ contract Vest {
     ) public onlyOwner onlyInactiveClaims(claimee) {
         ClaimData storage claimForUser = userClaims[claimee];
         _createChecks(amount, claimEndTimestamp, claimStartTimestamp);
-        totalClaimable += amount;
-        claimForUser.claimEnd = claimEndTimestamp;
-        claimForUser.totalVestedAmount = amount;
-        claimForUser.claimStart = claimStartTimestamp;
-        if (cliffPeriod > 0) {
-            _cliffChecks(claimForUser, cliffPeriod);
-            claimForUser.cliffEnd = cliffPeriod;
-        }
+        _setClaim(
+            claimForUser,
+            amount,
+            claimEndTimestamp,
+            claimStartTimestamp,
+            cliffPeriod
+        );
     }
 
     function restartClaim(
@@ -119,14 +118,13 @@ contract Vest {
             "Cannot create a new claim unless the old one has its claims withdrawn by the user"
         );
         _createChecks(amount, claimEndTimestamp, claimStartTimestamp);
-        totalClaimable += amount;
-        claimForUser.claimEnd = claimEndTimestamp;
-        claimForUser.totalVestedAmount = amount;
-        claimForUser.claimStart = claimStartTimestamp;
-        if (cliffPeriod > 0) {
-            _cliffChecks(claimForUser, cliffPeriod);
-            claimForUser.cliffEnd = cliffPeriod;
-        }
+        _setClaim(
+            claimForUser,
+            amount,
+            claimEndTimestamp,
+            claimStartTimestamp,
+            cliffPeriod
+        );
     }
 
     function removeClaimee(address claimee)
@@ -136,10 +134,7 @@ contract Vest {
     {
         ClaimData storage claimForUser = userClaims[claimee];
         _accrueRewards(claimForUser);
-        totalClaimable -= claimForUser.totalVestedAmount;
-        claimForUser.claimEnd = 0;
-        claimForUser.cliffEnd = 0;
-        claimForUser.claimStart = 0;
+        _clearClaim(claimForUser);
     }
 
     function changeTotalVestedAmount(address claimee, uint256 newAmount)
@@ -271,5 +266,33 @@ contract Vest {
                 ERC20(claimToken).balanceOf(address(this)),
             "Cannot add a user as the total claims would exceed token reserves"
         );
+    }
+
+    function _setClaim(
+        ClaimData memory _claim,
+        uint256 amount,
+        uint256 claimEndTimestamp,
+        uint256 claimStartTimestamp,
+        uint256 cliffPeriod
+    ) internal {
+        totalClaimable += amount;
+        _claim.claimEnd = claimEndTimestamp;
+        _claim.totalVestedAmount = amount;
+        _claim.claimStart = claimStartTimestamp;
+        _claim.dripped = 0;
+        if (cliffPeriod > 0) {
+            _cliffChecks(_claim, cliffPeriod);
+            _claim.cliffEnd = cliffPeriod;
+        }
+    }
+
+    function _clearClaim(ClaimData memory _claim) internal {
+        totalClaimable -= (_claim.totalVestedAmount - _claim.dripped);
+        _claim.claimEnd = 0;
+        _claim.cliffEnd = 0;
+        _claim.claimStart = 0;
+        _claim.totalVestedAmount = 0;
+        _claim.claimable = 0;
+        _claim.dripped = 0;
     }
 }
