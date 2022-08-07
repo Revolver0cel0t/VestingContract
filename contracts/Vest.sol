@@ -110,7 +110,7 @@ contract Vest {
     ) public onlyOwner onlyExpiredClaims(claimee) {
         ClaimData storage claimForUser = userClaims[claimee];
         require(
-            _remainingUserClaimableAmount(claimForUser) == 0,
+            claimForUser.claimable == 0,
             "Cannot create a new claim unless the old one has its claims withdrawn by the user"
         );
         _createChecks(amount, claimEndTimestamp, claimStartTimestamp);
