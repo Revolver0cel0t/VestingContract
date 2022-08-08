@@ -2,6 +2,7 @@
 pragma solidity ^0.8.9;
 
 import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+import "./Token.sol";
 
 contract Vest {
     struct ClaimData {
@@ -13,12 +14,12 @@ contract Vest {
         bool claimInvalid;
     }
 
-    address private _owner;
     address public claimToken;
     uint256 public totalClaimable;
 
-    mapping(address => ClaimData) private userClaims;
-    mapping(address => uint256) private claimableAmount;
+    address private _owner;
+    mapping(address => ClaimData) private _userClaims;
+    mapping(address => uint256) public _claimableAmount;
 
     modifier onlyOwner() {
         require(
@@ -28,12 +29,12 @@ contract Vest {
         _;
     }
 
-    modifier onlyActiveClaims(address claimee) {
+    modifier onlyNonExpiredClaims(address claimee) {
         require(
-            block.timestamp < userClaims[claimee].claimEnd &&
-                _remainingUserClaimableAmount(userClaims[claimee]) > 0 &&
-                userClaims[claimee].claimStart > 0 &&
-                !userClaims[claimee].claimInvalid,
+            block.timestamp < _userClaims[claimee].claimEnd &&
+                _remainingUserClaimableAmount(_userClaims[claimee]) > 0 &&
+                _userClaims[claimee].claimStart > 0 &&
+                !_userClaims[claimee].claimInvalid,
             "Expired or invalid claim"
         );
         _;
@@ -41,8 +42,8 @@ contract Vest {
 
     modifier onlyInactiveClaims(address claimee) {
         require(
-            userClaims[claimee].claimStart == 0 ||
-                userClaims[claimee].claimInvalid,
+            _userClaims[claimee].claimStart == 0 ||
+                _userClaims[claimee].claimInvalid,
             "Claim already exists for this account"
         );
         _;
@@ -53,19 +54,35 @@ contract Vest {
         claimToken = token;
     }
 
-    function depositToken(uint256 amount) public {
-        require(amount > 0, "Token amount has to be greater than 0!");
-        ERC20(claimToken).transferFrom(msg.sender, address(this), amount);
+    function getUserClaimData(address claimee) public view returns (ClaimData memory) {
+        return _userClaims[claimee];
+    }
+
+    function getUserClaimAmount(address claimee) public view returns (uint256) {
+        return _claimableAmount[claimee];
+    }
+
+    function getOwner() public view returns (address) {
+        return _owner;
+    }
+
+    function setOwner(address owner) public {
+        _owner = owner;
     }
 
     function withdrawTokens(uint256 amount, address account) public onlyOwner {
         require(amount > 0, "Token amount has to be greater than 0!");
-        ERC20 tokenContract = ERC20(claimToken);
+        RevToken tokenContract = RevToken(claimToken);
         require(
             tokenContract.balanceOf(address(this)) - amount >= totalClaimable,
             "Cant withdraw as it would lead to balances < claims"
         );
         tokenContract.transferFrom(address(this), account, amount);
+    }
+
+    function accrueRewardsForAccount(address claimee) public{
+        ClaimData storage claimForUser = _userClaims[claimee];
+        _accrueRewards(claimForUser, claimee);
     }
 
     function addClaimee(
@@ -75,7 +92,7 @@ contract Vest {
         uint256 claimStartTimestamp,
         uint256 cliffPeriod
     ) public onlyOwner onlyInactiveClaims(claimee) {
-        ClaimData storage claimForUser = userClaims[claimee];
+        ClaimData storage claimForUser = _userClaims[claimee];
         _createChecks(amount, claimEndTimestamp, claimStartTimestamp);
         _setClaim(
             claimForUser,
@@ -93,7 +110,7 @@ contract Vest {
         uint256 claimStartTimestamp,
         uint256 cliffPeriod
     ) public onlyOwner {
-        ClaimData storage claimForUser = userClaims[claimee];
+        ClaimData storage claimForUser = _userClaims[claimee];
         _accrueRewards(claimForUser, claimee);
         _createChecks(amount, claimEndTimestamp, claimStartTimestamp);
         _clearClaimable(claimForUser);
@@ -109,9 +126,9 @@ contract Vest {
     function removeClaimee(address claimee)
         public
         onlyOwner
-        onlyActiveClaims(claimee)
+        onlyNonExpiredClaims(claimee)
     {
-        ClaimData storage claimForUser = userClaims[claimee];
+        ClaimData storage claimForUser = _userClaims[claimee];
         _accrueRewards(claimForUser, claimee);
         _clearClaimable(claimForUser);
         claimForUser.claimInvalid = true;
@@ -120,14 +137,15 @@ contract Vest {
     function changeTotalVestedAmount(address claimee, uint256 newAmount)
         public
         onlyOwner
-        onlyActiveClaims(claimee)
+        onlyNonExpiredClaims(claimee)
     {
-        ClaimData storage claimForUser = userClaims[claimee];
+        ClaimData storage claimForUser = _userClaims[claimee];
         require(newAmount > 0, "New amount must be greater than 0!");
         require(
             claimForUser.dripped < newAmount,
             "That amount has already been vested to the user"
         );
+        _accrueRewards(claimForUser, claimee);
         uint256 newTotal = totalClaimable +
             (newAmount) -
             (_remainingUserClaimableAmount(claimForUser));
@@ -135,7 +153,6 @@ contract Vest {
             newTotal <= ERC20(claimToken).balanceOf(address(this)),
             "Cannot change claim amount as the total claims would exceed token reserves"
         );
-        _accrueRewards(claimForUser, claimee);
         totalClaimable = newTotal;
         claimForUser.totalVestedAmount = newAmount;
     }
@@ -143,9 +160,9 @@ contract Vest {
     function changeVestPeriod(address claimee, uint256 newPeriod)
         public
         onlyOwner
-        onlyActiveClaims(claimee)
+        onlyNonExpiredClaims(claimee)
     {
-        ClaimData storage claimForUser = userClaims[claimee];
+        ClaimData storage claimForUser = _userClaims[claimee];
         require(
             newPeriod > block.timestamp,
             "New claim period has to be greater than the current time"
@@ -163,36 +180,38 @@ contract Vest {
     function changeCliff(address claimee, uint256 newCliff)
         public
         onlyOwner
-        onlyActiveClaims(claimee)
+        onlyNonExpiredClaims(claimee)
     {
-        ClaimData storage claimForUser = userClaims[claimee];
+        ClaimData storage claimForUser = _userClaims[claimee];
         require(claimForUser.cliffEnd != 0, "Can only modify if cliff exists");
         _cliffChecks(claimForUser, newCliff);
         claimForUser.cliffEnd = newCliff;
     }
 
     function withdrawAccruedTokens(address claimee) public {
-        ClaimData storage claimForUser = userClaims[claimee];
+        ClaimData storage claimForUser = _userClaims[claimee];
         _accrueRewards(claimForUser, claimee);
-        require(claimableAmount[claimee] > 0, "Nothing to claim");
+        require(_claimableAmount[claimee] > 0, "Nothing to claim");
         ERC20(claimToken).transferFrom(
             address(this),
             claimee,
-            claimableAmount[claimee]
+            _claimableAmount[claimee]
         );
-        claimableAmount[claimee] = 0;
+        _claimableAmount[claimee] = 0;
     }
 
     function _accrueRewards(ClaimData storage claimForUser, address claimee)
         internal
     {
-        uint256 rewards = _calculateUserClaimableRewards(
-            claimForUser,
-            block.timestamp
-        );
-        totalClaimable -= rewards;
-        claimForUser.dripped += rewards;
-        claimableAmount[claimee] += rewards;
+        if (!claimForUser.claimInvalid) {
+            uint256 rewards = _calculateUserClaimableRewards(
+                claimForUser,
+                block.timestamp
+            );
+            totalClaimable -= rewards;
+            claimForUser.dripped += rewards;
+            _claimableAmount[claimee] += rewards;
+        }
     }
 
     function _calculateUserClaimableRewards(
@@ -251,7 +270,7 @@ contract Vest {
     }
 
     function _setClaim(
-        ClaimData memory _claim,
+        ClaimData storage _claim,
         uint256 amount,
         uint256 claimEndTimestamp,
         uint256 claimStartTimestamp,

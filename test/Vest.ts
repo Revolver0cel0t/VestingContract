@@ -3,117 +3,150 @@ import { anyValue } from "@nomicfoundation/hardhat-chai-matchers/withArgs";
 import { expect } from "chai";
 import { ethers } from "hardhat";
 
+const MAX_UINT_256 = ethers.BigNumber.from(2).pow(256).sub(1);
+
 describe("Vest", function () {
   async function deployVestFixture() {
-    // Contracts are deployed using the first signer/account by default
     const [owner, otherAccount] = await ethers.getSigners();
 
     const Vest = await ethers.getContractFactory("Vest");
-    const RevToken = await ethers.getContractFactory("ERC20");
-    const token = await RevToken.deploy("RevToken", "REV");
-    const vest = await Vest.deploy(owner, token.address);
+    const RevToken = await ethers.getContractFactory("RevToken");
+    const token = await RevToken.deploy();
+    const vest = await Vest.deploy(owner.address, token.address);
 
-    vest.me;
+    await token.approveFor(vest.address, otherAccount.address, MAX_UINT_256);
+    await token.approveFor(otherAccount.address, vest.address, MAX_UINT_256);
+    await token.approveFor(vest.address, owner.address, MAX_UINT_256);
+    await token.approveFor(owner.address, vest.address, MAX_UINT_256);
+
+    await token.mintToUser(vest.address, ethers.BigNumber.from("500").pow(18));
+
+    return { vest, token, owner, otherAccount };
+  }
+
+  async function createClaimFixture() {
+    const { vest, token, owner, otherAccount } = await deployVestFixture();
+    const params = {
+      address: otherAccount.address,
+      totalVestedAmount: ethers.BigNumber.from("10").pow(18),
+      claimStart: ethers.BigNumber.from((Date.now() / 1000).toFixed(0)),
+      claimEnd: ethers.BigNumber.from(
+        ethers.BigNumber.from((Date.now() / 1000 + 15780000).toFixed(0))
+      ),
+      cliffEnd: ethers.BigNumber.from(0),
+    };
+
+    // await token
+    await vest.addClaimee(
+      params.address,
+      params.totalVestedAmount,
+      params.claimEnd,
+      params.claimStart,
+      params.cliffEnd
+    );
 
     return { vest, token, owner, otherAccount };
   }
 
   describe("Deployment", function () {
-    it("Should set the right unlockTime", async function () {
-      const { lock, unlockTime } = await loadFixture(deployOneYearLockFixture);
-
-      expect(await lock.unlockTime()).to.equal(unlockTime);
-    });
-
     it("Should set the right owner", async function () {
-      const { lock, owner } = await loadFixture(deployOneYearLockFixture);
+      const { vest, owner } = await loadFixture(deployVestFixture);
 
-      expect(await lock.owner()).to.equal(owner.address);
+      expect(await vest.getOwner()).to.equal(owner.address);
     });
 
-    it("Should receive and store the funds to lock", async function () {
-      const { lock, lockedAmount } = await loadFixture(
-        deployOneYearLockFixture
+    it("Should set the right token address", async function () {
+      const { vest, token } = await loadFixture(deployVestFixture);
+
+      expect(await vest.claimToken()).to.equal(token.address);
+    });
+
+    it("Should set the right params when creating a claim", async function () {
+      const { vest, otherAccount } = await loadFixture(deployVestFixture);
+
+      const params = {
+        address: otherAccount.address,
+        totalVestedAmount: ethers.BigNumber.from("10").pow(18),
+        claimStart: ethers.BigNumber.from((Date.now() / 1000).toFixed(0)),
+        claimEnd: ethers.BigNumber.from(
+          ethers.BigNumber.from((Date.now() / 1000 + 15780000).toFixed(0))
+        ),
+        cliffEnd: ethers.BigNumber.from(0),
+      };
+
+      // await token
+      await vest.addClaimee(
+        params.address,
+        params.totalVestedAmount,
+        params.claimEnd,
+        params.claimStart,
+        params.cliffEnd
       );
+      const returnedParams = await vest.getUserClaimData(otherAccount.address);
+      expect(returnedParams.totalVestedAmount).to.equal(
+        params.totalVestedAmount
+      );
+      expect(returnedParams.claimStart).to.equal(params.claimStart);
+      expect(returnedParams.claimEnd).to.equal(params.claimEnd);
+      expect(returnedParams.cliffEnd).to.equal(params.cliffEnd);
+    });
+    it("Claimable amount should increase after a few seconds", function (done) {
+      this.timeout(4500);
 
-      expect(await ethers.provider.getBalance(lock.address)).to.equal(
-        lockedAmount
+      setTimeout(function () {
+        loadFixture(deployVestFixture).then(({ vest, otherAccount }) => {
+          const params = {
+            address: otherAccount.address,
+            totalVestedAmount: ethers.BigNumber.from("10").pow(18),
+            claimStart: ethers.BigNumber.from((Date.now() / 1000).toFixed(0)),
+            claimEnd: ethers.BigNumber.from(
+              ethers.BigNumber.from((Date.now() / 1000 + 15780000).toFixed(0))
+            ),
+            cliffEnd: ethers.BigNumber.from(0),
+          };
+
+          return vest
+            .addClaimee(
+              params.address,
+              params.totalVestedAmount,
+              params.claimEnd,
+              params.claimStart,
+              params.cliffEnd
+            )
+            .then(async () => {
+              return vest.accrueRewardsForAccount(params.address);
+            })
+            .then(async () => {
+              return vest.getUserClaimAmount(otherAccount.address);
+            })
+            .then((returnedParams) => {
+              if (!returnedParams.gt(0)) {
+                done("Returned amount not greater than 0");
+              } else {
+                done();
+              }
+            });
+        });
+      }, 3000);
+    });
+
+    it("When withdraw amount <= balance - totalClaimable,success", async function () {
+      const { vest, otherAccount } = await loadFixture(createClaimFixture);
+
+      await vest.withdrawTokens(
+        ethers.BigNumber.from("200").pow(18),
+        otherAccount.address
       );
     });
+    it("When withdraw amount > balance - totalClaimable,failure", async function () {
+      const { vest, otherAccount } = await loadFixture(createClaimFixture);
 
-    it("Should fail if the unlockTime is not in the future", async function () {
-      // We don't use the fixture here because we want a different deployment
-      const latestTime = await time.latest();
-      const Lock = await ethers.getContractFactory("Lock");
-      await expect(Lock.deploy(latestTime, { value: 1 })).to.be.revertedWith(
-        "Unlock time should be in the future"
-      );
-    });
-  });
-
-  describe("Withdrawals", function () {
-    describe("Validations", function () {
-      it("Should revert with the right error if called too soon", async function () {
-        const { lock } = await loadFixture(deployOneYearLockFixture);
-
-        await expect(lock.withdraw()).to.be.revertedWith(
-          "You can't withdraw yet"
-        );
-      });
-
-      it("Should revert with the right error if called from another account", async function () {
-        const { lock, unlockTime, otherAccount } = await loadFixture(
-          deployOneYearLockFixture
-        );
-
-        // We can increase the time in Hardhat Network
-        await time.increaseTo(unlockTime);
-
-        // We use lock.connect() to send a transaction from another account
-        await expect(lock.connect(otherAccount).withdraw()).to.be.revertedWith(
-          "You aren't the owner"
-        );
-      });
-
-      it("Shouldn't fail if the unlockTime has arrived and the owner calls it", async function () {
-        const { lock, unlockTime } = await loadFixture(
-          deployOneYearLockFixture
-        );
-
-        // Transactions are sent using the first signer by default
-        await time.increaseTo(unlockTime);
-
-        await expect(lock.withdraw()).not.to.be.reverted;
-      });
-    });
-
-    describe("Events", function () {
-      it("Should emit an event on withdrawals", async function () {
-        const { lock, unlockTime, lockedAmount } = await loadFixture(
-          deployOneYearLockFixture
-        );
-
-        await time.increaseTo(unlockTime);
-
-        await expect(lock.withdraw())
-          .to.emit(lock, "Withdrawal")
-          .withArgs(lockedAmount, anyValue); // We accept any value as `when` arg
-      });
-    });
-
-    describe("Transfers", function () {
-      it("Should transfer the funds to the owner", async function () {
-        const { lock, unlockTime, lockedAmount, owner } = await loadFixture(
-          deployOneYearLockFixture
-        );
-
-        await time.increaseTo(unlockTime);
-
-        await expect(lock.withdraw()).to.changeEtherBalances(
-          [owner, lock],
-          [lockedAmount, -lockedAmount]
-        );
-      });
+      await expect(
+        vest.withdrawTokens(
+          ethers.BigNumber.from("500").pow(18),
+          otherAccount.address
+        )
+      ).to.be.reverted;
     });
   });
 });
