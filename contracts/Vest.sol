@@ -6,11 +6,11 @@ import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 contract Vest {
     struct ClaimData {
         uint256 totalVestedAmount;
-        uint256 claimable;
         uint256 dripped;
         uint256 claimStart;
         uint256 claimEnd;
         uint256 cliffEnd;
+        bool claimInvalid;
     }
 
     address private _owner;
@@ -18,6 +18,7 @@ contract Vest {
     uint256 public totalClaimable;
 
     mapping(address => ClaimData) private userClaims;
+    mapping(address => uint256) private claimableAmount;
 
     modifier onlyOwner() {
         require(
@@ -27,37 +28,21 @@ contract Vest {
         _;
     }
 
-    modifier onlyExistingClaims(address claimee) {
-        require(
-            userClaims[claimee].claimStart > 0,
-            "Claim doesnt exist on account"
-        );
-        _;
-    }
-
     modifier onlyActiveClaims(address claimee) {
         require(
             block.timestamp < userClaims[claimee].claimEnd &&
                 _remainingUserClaimableAmount(userClaims[claimee]) > 0 &&
-                userClaims[claimee].claimStart > 0,
-            "Expired claim"
-        );
-        _;
-    }
-
-    modifier onlyExpiredClaims(address claimee) {
-        require(
-            userClaims[claimee].claimStart > 0 &&
-                !(block.timestamp < userClaims[claimee].claimEnd &&
-                    _remainingUserClaimableAmount(userClaims[claimee]) > 0),
-            "Active claim"
+                userClaims[claimee].claimStart > 0 &&
+                !userClaims[claimee].claimInvalid,
+            "Expired or invalid claim"
         );
         _;
     }
 
     modifier onlyInactiveClaims(address claimee) {
         require(
-            userClaims[claimee].claimStart == 0,
+            userClaims[claimee].claimStart == 0 ||
+                userClaims[claimee].claimInvalid,
             "Claim already exists for this account"
         );
         _;
@@ -107,13 +92,11 @@ contract Vest {
         uint256 claimEndTimestamp,
         uint256 claimStartTimestamp,
         uint256 cliffPeriod
-    ) public onlyOwner onlyExpiredClaims(claimee) {
+    ) public onlyOwner {
         ClaimData storage claimForUser = userClaims[claimee];
-        require(
-            claimForUser.claimable == 0,
-            "Cannot create a new claim unless the old one has its claims withdrawn by the user"
-        );
+        _accrueRewards(claimForUser, claimee);
         _createChecks(amount, claimEndTimestamp, claimStartTimestamp);
+        _clearClaimable(claimForUser);
         _setClaim(
             claimForUser,
             amount,
@@ -126,14 +109,12 @@ contract Vest {
     function removeClaimee(address claimee)
         public
         onlyOwner
-        onlyExistingClaims(claimee)
+        onlyActiveClaims(claimee)
     {
         ClaimData storage claimForUser = userClaims[claimee];
-        require(
-            claimForUser.claimable == 0,
-            "Cannot create a new claim unless the old one has its claims withdrawn by the user"
-        );
-        _clearClaim(claimForUser);
+        _accrueRewards(claimForUser, claimee);
+        _clearClaimable(claimForUser);
+        claimForUser.claimInvalid = true;
     }
 
     function changeTotalVestedAmount(address claimee, uint256 newAmount)
@@ -154,7 +135,7 @@ contract Vest {
             newTotal <= ERC20(claimToken).balanceOf(address(this)),
             "Cannot change claim amount as the total claims would exceed token reserves"
         );
-        _accrueRewards(claimForUser);
+        _accrueRewards(claimForUser, claimee);
         totalClaimable = newTotal;
         claimForUser.totalVestedAmount = newAmount;
     }
@@ -175,7 +156,7 @@ contract Vest {
                 "New claim period has to be greater than the cliff"
             );
         }
-        _accrueRewards(claimForUser);
+        _accrueRewards(claimForUser, claimee);
         claimForUser.claimEnd = newPeriod;
     }
 
@@ -192,24 +173,26 @@ contract Vest {
 
     function withdrawAccruedTokens(address claimee) public {
         ClaimData storage claimForUser = userClaims[claimee];
-        _accrueRewards(claimForUser);
-        require(claimForUser.claimable > 0, "Nothing to claim");
+        _accrueRewards(claimForUser, claimee);
+        require(claimableAmount[claimee] > 0, "Nothing to claim");
         ERC20(claimToken).transferFrom(
             address(this),
             claimee,
-            claimForUser.claimable
+            claimableAmount[claimee]
         );
-        claimForUser.claimable = 0;
+        claimableAmount[claimee] = 0;
     }
 
-    function _accrueRewards(ClaimData storage claimForUser) internal {
+    function _accrueRewards(ClaimData storage claimForUser, address claimee)
+        internal
+    {
         uint256 rewards = _calculateUserClaimableRewards(
             claimForUser,
             block.timestamp
         );
         totalClaimable -= rewards;
         claimForUser.dripped += rewards;
-        claimForUser.claimable += rewards;
+        claimableAmount[claimee] += rewards;
     }
 
     function _calculateUserClaimableRewards(
@@ -279,20 +262,15 @@ contract Vest {
         _claim.totalVestedAmount = amount;
         _claim.claimStart = claimStartTimestamp;
         _claim.dripped = 0;
+        _claim.claimInvalid = false;
         if (cliffPeriod > 0) {
             _cliffChecks(_claim, cliffPeriod);
             _claim.cliffEnd = cliffPeriod;
         }
     }
 
-    function _clearClaim(ClaimData memory _claim) internal {
+    function _clearClaimable(ClaimData memory _claim) internal {
         totalClaimable -= (_claim.totalVestedAmount - _claim.dripped);
-        _claim.claimEnd = 0;
-        _claim.cliffEnd = 0;
-        _claim.claimStart = 0;
-        _claim.totalVestedAmount = 0;
-        _claim.claimable = 0;
-        _claim.dripped = 0;
     }
 
     function _remainingUserClaimableAmount(ClaimData memory _claim)
