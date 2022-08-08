@@ -5,9 +5,7 @@ import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 
 contract RevToken is ERC20  {
     
-    constructor() ERC20("RevToken", "REV"){
-        
-    }
+    constructor() ERC20("RevToken", "REV"){}
 
     function mintToUser(address user,uint256 amount) public{
         _mint(user, amount);

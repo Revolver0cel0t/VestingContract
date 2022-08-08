@@ -45,7 +45,16 @@ describe("Vest", function () {
       params.cliffEnd
     );
 
-    return { vest, token, owner, otherAccount };
+    return { vest, token, owner, otherAccount, params };
+  }
+
+  async function revokedClaimFixture() {
+    const { vest, token, owner, otherAccount, params } =
+      await createClaimFixture();
+
+    await vest.removeClaimee(otherAccount.address);
+
+    return { vest, token, owner, otherAccount, params };
   }
 
   describe("Deployment", function () {
@@ -94,39 +103,22 @@ describe("Vest", function () {
       this.timeout(4500);
 
       setTimeout(function () {
-        loadFixture(deployVestFixture).then(({ vest, otherAccount }) => {
-          const params = {
-            address: otherAccount.address,
-            totalVestedAmount: ethers.BigNumber.from("10").pow(18),
-            claimStart: ethers.BigNumber.from((Date.now() / 1000).toFixed(0)),
-            claimEnd: ethers.BigNumber.from(
-              ethers.BigNumber.from((Date.now() / 1000 + 15780000).toFixed(0))
-            ),
-            cliffEnd: ethers.BigNumber.from(0),
-          };
-
-          return vest
-            .addClaimee(
-              params.address,
-              params.totalVestedAmount,
-              params.claimEnd,
-              params.claimStart,
-              params.cliffEnd
-            )
-            .then(async () => {
-              return vest.accrueRewardsForAccount(params.address);
-            })
-            .then(async () => {
-              return vest.getUserClaimAmount(otherAccount.address);
-            })
-            .then((returnedParams) => {
-              if (!returnedParams.gt(0)) {
-                done("Returned amount not greater than 0");
-              } else {
-                done();
-              }
-            });
-        });
+        loadFixture(createClaimFixture).then(
+          ({ vest, otherAccount, params }) => {
+            return vest
+              .accrueRewardsForAccount(params.address)
+              .then(async () => {
+                return vest.getUserClaimAmount(otherAccount.address);
+              })
+              .then((returnedParams) => {
+                if (!returnedParams.gt(0)) {
+                  done("Returned amount not greater than 0");
+                } else {
+                  done();
+                }
+              });
+          }
+        );
       }, 3000);
     });
 
@@ -138,6 +130,7 @@ describe("Vest", function () {
         otherAccount.address
       );
     });
+
     it("When withdraw amount > balance - totalClaimable,failure", async function () {
       const { vest, otherAccount } = await loadFixture(createClaimFixture);
 
@@ -145,6 +138,35 @@ describe("Vest", function () {
         vest.withdrawTokens(
           ethers.BigNumber.from("500").pow(18),
           otherAccount.address
+        )
+      ).to.be.reverted;
+    });
+
+    it("When claim is revoked, claimInvalid must be equal to true", async function () {
+      const { vest, otherAccount } = await loadFixture(revokedClaimFixture);
+
+      const claimeeData = await vest.getUserClaimData(otherAccount.address);
+      expect(claimeeData.claimInvalid).to.equal(true);
+    });
+
+    it("When claim is revoked, cannot access updater functions", async function () {
+      const { vest, otherAccount } = await loadFixture(revokedClaimFixture);
+      expect(
+        vest.changeTotalVestedAmount(
+          otherAccount.address,
+          ethers.BigNumber.from(10).pow(18)
+        )
+      ).to.be.reverted;
+      expect(
+        vest.changeVestPeriod(
+          otherAccount.address,
+          ethers.BigNumber.from(10).pow(18)
+        )
+      ).to.be.reverted;
+      expect(
+        vest.changeCliff(
+          otherAccount.address,
+          ethers.BigNumber.from(10).pow(18)
         )
       ).to.be.reverted;
     });
