@@ -1,9 +1,9 @@
-import { time, loadFixture } from "@nomicfoundation/hardhat-network-helpers";
-import { anyValue } from "@nomicfoundation/hardhat-chai-matchers/withArgs";
+import { loadFixture } from "@nomicfoundation/hardhat-network-helpers";
 import { expect } from "chai";
 import { ethers } from "hardhat";
 
 const MAX_UINT_256 = ethers.BigNumber.from(2).pow(256).sub(1);
+const tokenPower = ethers.BigNumber.from(10).pow(18);
 
 describe("Vest", function () {
   async function deployVestFixture() {
@@ -19,7 +19,10 @@ describe("Vest", function () {
     await token.approveFor(vest.address, owner.address, MAX_UINT_256);
     await token.approveFor(owner.address, vest.address, MAX_UINT_256);
 
-    await token.mintToUser(vest.address, ethers.BigNumber.from("500").pow(18));
+    await token.mintToUser(
+      vest.address,
+      ethers.BigNumber.from("500").mul(tokenPower)
+    );
 
     return { vest, token, owner, otherAccount };
   }
@@ -28,7 +31,7 @@ describe("Vest", function () {
     const { vest, token, owner, otherAccount } = await deployVestFixture();
     const params = {
       address: otherAccount.address,
-      totalVestedAmount: ethers.BigNumber.from("10").pow(18),
+      totalVestedAmount: ethers.BigNumber.from("10").mul(tokenPower),
       claimStart: ethers.BigNumber.from((Date.now() / 1000).toFixed(0)),
       claimEnd: ethers.BigNumber.from(
         ethers.BigNumber.from((Date.now() / 1000 + 15780000).toFixed(0))
@@ -75,7 +78,7 @@ describe("Vest", function () {
 
       const params = {
         address: otherAccount.address,
-        totalVestedAmount: ethers.BigNumber.from("10").pow(18),
+        totalVestedAmount: ethers.BigNumber.from("10").mul(tokenPower),
         claimStart: ethers.BigNumber.from((Date.now() / 1000).toFixed(0)),
         claimEnd: ethers.BigNumber.from(
           ethers.BigNumber.from((Date.now() / 1000 + 15780000).toFixed(0))
@@ -99,6 +102,7 @@ describe("Vest", function () {
       expect(returnedParams.claimEnd).to.equal(params.claimEnd);
       expect(returnedParams.cliffEnd).to.equal(params.cliffEnd);
     });
+
     it("Claimable amount should increase after a few seconds", function (done) {
       this.timeout(4500);
 
@@ -122,11 +126,37 @@ describe("Vest", function () {
       }, 3000);
     });
 
+    it("Claiming should send tokens", function (done) {
+      this.timeout(4500);
+
+      setTimeout(function () {
+        loadFixture(createClaimFixture).then(
+          ({ vest, otherAccount, params, token }) => {
+            return vest
+              .accrueRewardsForAccount(params.address)
+              .then(async () => {
+                return vest.withdrawAccruedTokens(otherAccount.address);
+              })
+              .then(() => {
+                return token.balanceOf(otherAccount.address);
+              })
+              .then((returnedParams) => {
+                if (!returnedParams.gt(0)) {
+                  done("Returned amount not greater than 0");
+                } else {
+                  done();
+                }
+              });
+          }
+        );
+      }, 3000);
+    });
+
     it("When withdraw amount <= balance - totalClaimable,success", async function () {
       const { vest, otherAccount } = await loadFixture(createClaimFixture);
 
       await vest.withdrawTokens(
-        ethers.BigNumber.from("200").pow(18),
+        ethers.BigNumber.from("200").mul(tokenPower),
         otherAccount.address
       );
     });
@@ -136,7 +166,7 @@ describe("Vest", function () {
 
       await expect(
         vest.withdrawTokens(
-          ethers.BigNumber.from("500").pow(18),
+          ethers.BigNumber.from("500").mul(tokenPower),
           otherAccount.address
         )
       ).to.be.reverted;
@@ -154,19 +184,56 @@ describe("Vest", function () {
       expect(
         vest.changeTotalVestedAmount(
           otherAccount.address,
-          ethers.BigNumber.from(10).pow(18)
+          ethers.BigNumber.from(10).mul(tokenPower)
         )
       ).to.be.reverted;
       expect(
         vest.changeVestPeriod(
           otherAccount.address,
-          ethers.BigNumber.from(10).pow(18)
+          ethers.BigNumber.from(10).mul(tokenPower)
         )
       ).to.be.reverted;
       expect(
         vest.changeCliff(
           otherAccount.address,
-          ethers.BigNumber.from(10).pow(18)
+          ethers.BigNumber.from(10).mul(tokenPower)
+        )
+      ).to.be.reverted;
+    });
+
+    it("Update claim amount function", async function () {
+      const { vest, otherAccount } = await loadFixture(createClaimFixture);
+
+      const claimData = await vest.getUserClaimData(otherAccount.address);
+      await vest.changeTotalVestedAmount(
+        otherAccount.address,
+        ethers.BigNumber.from(495).mul(tokenPower)
+      );
+      const newClaimData = await vest.getUserClaimData(otherAccount.address);
+      expect(newClaimData.totalVestedAmount).to.greaterThan(
+        claimData.totalVestedAmount
+      );
+    });
+
+    it("Update claim duration function", async function () {
+      const { vest, otherAccount } = await loadFixture(createClaimFixture);
+
+      const claimData = await vest.getUserClaimData(otherAccount.address);
+      await vest.changeVestPeriod(
+        otherAccount.address,
+        ethers.BigNumber.from(495).mul(tokenPower)
+      );
+      const newClaimData = await vest.getUserClaimData(otherAccount.address);
+      expect(newClaimData.claimEnd).to.greaterThan(claimData.claimEnd);
+    });
+
+    it("Cliff cant be set if not set previously", async function () {
+      const { vest, otherAccount } = await loadFixture(createClaimFixture);
+
+      expect(
+        vest.changeVestPeriod(
+          otherAccount.address,
+          ethers.BigNumber.from(495).mul(tokenPower)
         )
       ).to.be.reverted;
     });
